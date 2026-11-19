@@ -13,6 +13,57 @@ type VoiceAssessment = {
 
 const SAMPLE_MS = 6000;
 const PAUSE_MS = 1500;
+const TARGET_SAMPLE_RATE = 16000;
+
+type Capture = {
+  ctx: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  processor: ScriptProcessorNode;
+  sink: GainNode;
+};
+
+function downsample(input: Float32Array, inRate: number, outRate: number): Float32Array {
+  if (inRate === outRate) return input;
+  const ratio = inRate / outRate;
+  const length = Math.floor(input.length / ratio);
+  const output = new Float32Array(length);
+  for (let i = 0; i < length; i += 1) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(Math.floor((i + 1) * ratio), input.length);
+    let sum = 0;
+    for (let j = start; j < end; j += 1) sum += input[j];
+    output[i] = sum / Math.max(1, end - start);
+  }
+  return output;
+}
+
+function encodeWav(samples: Float32Array, sampleRate: number): Blob {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (offset: number, text: string) => {
+    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    offset += 2;
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
 
 export default function CallGuard() {
   const [consent, setConsent] = useState(false);
@@ -24,7 +75,7 @@ export default function CallGuard() {
   const [error, setError] = useState<string | null>(null);
 
   const streamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
+  const captureRef = useRef<Capture | null>(null);
   const timerRef = useRef<number | null>(null);
   const stopTimerRef = useRef<number | null>(null);
   const sessionRef = useRef(0);
@@ -36,12 +87,18 @@ export default function CallGuard() {
     if (stopTimerRef.current !== null) window.clearTimeout(stopTimerRef.current);
     timerRef.current = null;
     stopTimerRef.current = null;
-    try {
-      recorderRef.current?.stop();
-    } catch {
-      // Recorder may already be stopped.
+    const capture = captureRef.current;
+    if (capture) {
+      try {
+        capture.processor.disconnect();
+        capture.source.disconnect();
+        capture.sink.disconnect();
+      } catch {
+        // Nodes may already be disconnected.
+      }
+      void capture.ctx.close().catch(() => undefined);
+      captureRef.current = null;
     }
-    recorderRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     window.speechSynthesis?.cancel();
@@ -94,42 +151,81 @@ export default function CallGuard() {
     };
   })();
 
-  const checkSample = async (stream: MediaStream, sessionId: number) => {
+  const checkSample = (stream: MediaStream, sessionId: number, ctx: AudioContext) => {
     if (sessionRef.current !== sessionId || !stream.active) return;
-    if (typeof MediaRecorder === 'undefined') {
-      setError('This browser cannot listen for voice checks. Please try Chrome or Edge.');
-      setActive(false);
-      return;
-    }
 
-    let recorder: MediaRecorder;
+    let source: MediaStreamAudioSourceNode;
     try {
-      recorder = new MediaRecorder(stream);
+      source = ctx.createMediaStreamSource(stream);
     } catch {
       setError('This browser cannot listen for voice checks. Please try Chrome or Edge.');
       setActive(false);
       return;
     }
-    recorderRef.current = recorder;
-    const chunks: BlobPart[] = [];
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
+    const chunks: Float32Array[] = [];
 
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) chunks.push(event.data);
+    processor.onaudioprocess = (event) => {
+      if (sessionRef.current !== sessionId) return;
+      chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
     };
 
-    recorder.onstop = async () => {
+    source.connect(processor);
+    processor.connect(sink);
+    sink.connect(ctx.destination);
+    captureRef.current = { ctx, source, processor, sink };
+    setStatusText('Listening and checking…');
+
+    stopTimerRef.current = window.setTimeout(() => {
       if (sessionRef.current !== sessionId) return;
-      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-      if (blob.size < 1000) {
-        timerRef.current = window.setTimeout(() => void checkSample(stream, sessionId), PAUSE_MS);
-        return;
-      }
-      setStatusText('Sending a voice sample to the checker…');
       try {
-        const form = new FormData();
-        form.append('audio_file', blob, 'call-sample.webm');
-        const response = await fetch(`${FRAUD_API_BASE_URL}/voice-authenticity`, { method: 'POST', body: form });
-        if (!response.ok) throw new Error('voice check failed');
+        processor.disconnect();
+        source.disconnect();
+        sink.disconnect();
+      } catch {
+        // Nodes may already be disconnected.
+      }
+      if (captureRef.current?.processor === processor) captureRef.current = null;
+
+      void (async () => {
+        const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+        if (total < ctx.sampleRate * 0.5) {
+          timerRef.current = window.setTimeout(() => checkSample(stream, sessionId, ctx), PAUSE_MS);
+          return;
+        }
+        const merged = new Float32Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+        const pcm = downsample(merged, ctx.sampleRate, TARGET_SAMPLE_RATE);
+        const blob = encodeWav(pcm, TARGET_SAMPLE_RATE);
+
+        setStatusText('Sending a voice sample to the checker…');
+        let response: Response;
+        try {
+          const form = new FormData();
+          form.append('audio_file', blob, 'call-sample.wav');
+          response = await fetch(`${FRAUD_API_BASE_URL}/voice-authenticity`, { method: 'POST', body: form });
+        } catch {
+          if (sessionRef.current !== sessionId) return;
+          setError('The voice checker is not reachable. Make sure the Shield helper is running on this computer.');
+          setStatusText('Check paused. I will try again.');
+          timerRef.current = window.setTimeout(() => checkSample(stream, sessionId, ctx), 4000);
+          return;
+        }
+
+        if (!response.ok) {
+          if (sessionRef.current !== sessionId) return;
+          setError('The voice checker had trouble with that sound. Please try again.');
+          setStatusText('Check paused. I will try again.');
+          timerRef.current = window.setTimeout(() => checkSample(stream, sessionId, ctx), 4000);
+          return;
+        }
+
         const result = (await response.json()) as VoiceAssessment;
         if (sessionRef.current !== sessionId) return;
         setAssessment(result);
@@ -144,28 +240,12 @@ export default function CallGuard() {
         if (!result.suspected) {
           spokenRef.current = false;
         }
-      } catch {
+
         if (sessionRef.current === sessionId) {
-          setError('The voice checker is not reachable. Make sure the Shield helper is running on this computer.');
-          setStatusText('Check paused.');
+          timerRef.current = window.setTimeout(() => checkSample(stream, sessionId, ctx), PAUSE_MS);
         }
-        return;
-      }
-
-      if (sessionRef.current === sessionId) {
-        timerRef.current = window.setTimeout(() => void checkSample(stream, sessionId), PAUSE_MS);
-      }
-    };
-
-    recorder.start();
-    stopTimerRef.current = window.setTimeout(() => {
-      try {
-        recorder.stop();
-      } catch {
-        // Already stopped.
-      }
+      })();
     }, SAMPLE_MS);
-    setStatusText('Listening and checking…');
   };
 
   const start = async () => {
@@ -174,19 +254,32 @@ export default function CallGuard() {
     setAssessment(null);
     setSamples(0);
     spokenRef.current = false;
+    const AudioCtor =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtor) {
+      setError('This browser cannot listen for voice checks. Please try Chrome or Edge.');
+      setStarting(false);
+      return;
+    }
+    // Create the audio context inside the click so browsers allow it to run.
+    const ctx = new AudioCtor();
+    void ctx.resume().catch(() => undefined);
     const sessionId = sessionRef.current + 1;
     sessionRef.current = sessionId;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
       if (sessionRef.current !== sessionId) {
         stream.getTracks().forEach((track) => track.stop());
+        void ctx.close().catch(() => undefined);
         return;
       }
       streamRef.current = stream;
       setActive(true);
       setStatusText('Starting the microphone…');
-      void checkSample(stream, sessionId);
+      checkSample(stream, sessionId, ctx);
     } catch {
+      void ctx.close().catch(() => undefined);
       setError('I cannot use the microphone. Please allow microphone access for this page, then try again.');
     } finally {
       setStarting(false);

@@ -28,6 +28,26 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/agent", tags=["shield-agent"])
 
+
+def _load_env_file() -> None:
+    """Load api_python/.env (gitignored) so the Qwen key never lives in code."""
+    env_path = Path(__file__).with_name(".env")
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_env_file()
+
+QWEN_API_KEY = os.environ.get("QWEN_API_KEY", "").strip()
+QWEN_BASE_URL = (os.environ.get("QWEN_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+QWEN_MODEL = os.environ.get("QWEN_MODEL", "qwen-plus").strip()
+
 DOWNLOADS_DIR = Path(os.environ.get("SHIELD_DOWNLOADS_DIR") or (Path.home() / "Downloads")).resolve()
 QUARANTINE_DIR_NAME = ".ShieldGuardQuarantine"
 QUARANTINE_DIR = DOWNLOADS_DIR / QUARANTINE_DIR_NAME
@@ -915,6 +935,62 @@ def _chat_link(message: str) -> dict[str, Any] | None:
     )
 
 
+def _ai_context() -> str:
+    parts: list[str] = []
+    if _last_scan:
+        counts = _last_scan.get("counts") or {}
+        parts.append(
+            f"last downloads check: {counts.get('dangerous', 0)} dangerous, "
+            f"{counts.get('suspicious', 0)} suspicious, {counts.get('safe', 0)} safe files"
+        )
+    else:
+        parts.append("downloads folder has not been checked yet")
+    if _last_audit:
+        parts.append(f"last safety score: {_last_audit.get('score')} out of 100")
+    return "; ".join(parts)
+
+
+def _qwen_reply(message: str) -> str | None:
+    """Ask Qwen for a plain-language answer. Only counts are shared, never file names."""
+    if not QWEN_API_KEY:
+        return None
+    system = (
+        "You are Shield Helper, a calm and friendly assistant for elderly people. "
+        "Reply in short sentences and everyday words. Never ask for passwords, bank codes or personal details. "
+        "You cannot open files or perform actions yourself: the app has big buttons for checking downloads, "
+        "guarding a call and running a safety check. If the person seems worried, tell them to hang up or stop, "
+        "and to ask a family member they trust. Keep replies under 90 words. "
+        f"Current app status: {_ai_context()}."
+    )
+    payload = {
+        "model": QWEN_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": message[:1000]},
+        ],
+        "temperature": 0.4,
+        "max_tokens": 220,
+    }
+    with httpx.Client(trust_env=False, timeout=20.0) as client:
+        response = client.post(
+            f"{QWEN_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
+            json=payload,
+        )
+    response.raise_for_status()
+    data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    content = ((choices[0].get("message") or {}).get("content") or "").strip()
+    return content or None
+
+
+@router.get("/ai-status")
+def ai_status() -> dict[str, Any]:
+    return {"configured": bool(QWEN_API_KEY), "model": QWEN_MODEL if QWEN_API_KEY else None}
+
+
 @router.post("/chat")
 def agent_chat(request: ChatRequest) -> dict[str, Any]:
     message = request.message.strip()
@@ -952,11 +1028,21 @@ def agent_chat(request: ChatRequest) -> dict[str, Any]:
     if any(word in lowered for word in ["check", "audit", "safe", "security", "protect", "test"]):
         return _chat_audit()
 
-    if any(word in lowered for word in ["hello", "hi", "help", "what can you do"]):
+    if re.search(r"\b(hello|hi|hey|help)\b", lowered) or "what can you do" in lowered:
         return _reply(
             "Hello. I am your Shield Assistant. I can check your Downloads for dangerous apps, "
             "watch a suspicious call, or run a full safety check on this computer. What would you like me to do?",
         )
+
+    if QWEN_API_KEY:
+        try:
+            ai_text = _qwen_reply(message)
+            if ai_text:
+                return _reply(ai_text)
+        except httpx.HTTPError as exc:
+            print(f"[shield] Qwen request failed: {exc}")
+        except (KeyError, TypeError, ValueError) as exc:
+            print(f"[shield] Qwen response was unusable: {exc}")
 
     return _reply(
         "I can check your Downloads folder, guard a phone call, check a link, or run a full safety check. "
