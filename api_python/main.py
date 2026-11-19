@@ -1,5 +1,7 @@
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from io import BytesIO
 import joblib
@@ -7,6 +9,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import ipaddress
+from pathlib import Path
 from urllib.parse import urlparse
 import smtplib
 from email.mime.text import MIMEText
@@ -2917,3 +2920,17 @@ async def validate_recipient(request: ValidateRecipientRequest):
 @app.get("/api/pdrm/health")
 async def pdrm_health():
     return {"status": "operational", "mode": "live"}
+
+
+# Serve the built UI from the helper itself so one command runs the whole app.
+DIST_DIR = Path(__file__).resolve().parent.parent / "dist" / "public"
+if (DIST_DIR / "index.html").is_file():
+    if (DIST_DIR / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=DIST_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_ui(full_path: str):
+        candidate = (DIST_DIR / full_path).resolve()
+        if full_path and candidate.is_file() and DIST_DIR.resolve() in candidate.parents:
+            return FileResponse(candidate)
+        return FileResponse(DIST_DIR / "index.html")

@@ -4,9 +4,14 @@ export const FRAUD_API_BASE_URL = (() => {
   const configured = import.meta.env.VITE_FRAUD_API_BASE_URL as string | undefined;
   if (configured) return configured.replace(/\/+$/, '');
   const host = window.location.hostname;
-  if (host === 'localhost' || host === '127.0.0.1') return 'http://127.0.0.1:8000';
-  // Opened from another device on the same network: talk to the helper on the same machine serving this page.
-  return `${window.location.protocol}//${host}:8000`;
+  if (host !== 'localhost' && host !== '127.0.0.1') {
+    // Opened from another device: talk to the helper on the machine serving this page.
+    return `${window.location.protocol}//${host}:8000`;
+  }
+  const port = window.location.port;
+  if (!port || port === '3000' || port === '80') return 'http://127.0.0.1:8000';
+  // Built UI served by the helper itself: API lives on the same address.
+  return window.location.origin;
 })();
 
 // Generate login URL at runtime so redirect URI reflects the current origin.
