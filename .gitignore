@@ -45,6 +45,7 @@ pids
 *.pid
 *.seed
 *.pid.lock
+api_python/agent_state.json
 
 # Python artifacts
 __pycache__/

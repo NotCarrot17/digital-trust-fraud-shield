@@ -1,6 +1,13 @@
 export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 
-export const FRAUD_API_BASE_URL = "http://127.0.0.1:8000";
+export const FRAUD_API_BASE_URL = (() => {
+  const configured = import.meta.env.VITE_FRAUD_API_BASE_URL as string | undefined;
+  if (configured) return configured.replace(/\/+$/, '');
+  const host = window.location.hostname;
+  if (host === 'localhost' || host === '127.0.0.1') return 'http://127.0.0.1:8000';
+  // Opened from another device on the same network: talk to the helper on the same machine serving this page.
+  return `${window.location.protocol}//${host}:8000`;
+})();
 
 // Generate login URL at runtime so redirect URI reflects the current origin.
 export const getLoginUrl = () => {

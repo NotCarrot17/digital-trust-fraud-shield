@@ -1,4 +1,4 @@
-const CACHE_NAME = 'digital-trust-fraud-shield-v3';
+const CACHE_NAME = 'silver-shield-v1';
 const APP_SHELL = [
   '/',
   '/index.html',

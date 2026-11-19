@@ -1,12 +1,12 @@
 {
-  "name": "Digital Trust Fraud",
-  "short_name": "Fraud Shield",
-  "description": "AI-powered digital fraud protection demo app.",
+  "name": "Silver Shield",
+  "short_name": "Silver Shield",
+  "description": "A friendly safety companion for checking downloads, calls and computer safety.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#0D1624",
-  "theme_color": "#0D1624",
+  "background_color": "#F3F4F6",
+  "theme_color": "#F77F00",
   "icons": [
     {
       "src": "/icon-192.png",

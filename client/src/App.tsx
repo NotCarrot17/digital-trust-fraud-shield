@@ -1,65 +1,38 @@
 import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import NotFound from "@/pages/NotFound";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
-import Navigation from "./components/Navigation";
-import TourOverlay from "./components/TourOverlay";
-import { FraudEventsProvider } from "./contexts/FraudEventsContext";
-import { LanguageProvider } from "./contexts/LanguageContext";
+import ShieldNav from "./components/ShieldNav";
+import { AssistantProvider } from "./components/AssistantChat";
 import { ThemeProvider } from "./contexts/ThemeContext";
-import { TourProvider } from "./contexts/TourContext";
-import Landing from "./pages/Landing";
-import Transaction from "./pages/Transaction";
-import SwipeShield from "./pages/SwipeShield";
-import Profile from "./pages/Profile";
-import GuardianDemo from "./pages/GuardianDemo";
-import Admin from "./pages/Admin";
-import VerifyGuardian from "./pages/VerifyGuardian";
-
+import Home from "./pages/Home";
+import DownloadsGuard from "./pages/DownloadsGuard";
+import CallGuard from "./pages/CallGuard";
+import SecurityChecks from "./pages/SecurityChecks";
+import NotFound from "./pages/NotFound";
 
 function Router() {
   return (
     <Switch>
-      <Route path={"/"} component={Landing} />
-      <Route path={"/admin"} component={Admin} />
-      <Route path={"/transaction"} component={Transaction} />
-      <Route path={"/swipe-shield"} component={SwipeShield} />
-      <Route path={"/profile"} component={Profile} />
-      <Route path={"/guardian-notifications"} component={GuardianDemo} />
-      <Route path={"/guardian-demo"} component={GuardianDemo} />
-      <Route path={"/verify-guardian"} component={VerifyGuardian} />
-      <Route path={"/404"} component={NotFound} />
-      {/* Final fallback route */}
+      <Route path="/" component={Home} />
+      <Route path="/downloads" component={DownloadsGuard} />
+      <Route path="/calls" component={CallGuard} />
+      <Route path="/checks" component={SecurityChecks} />
       <Route component={NotFound} />
     </Switch>
   );
 }
 
-// NOTE: About Theme
-// - First choose a default theme according to your design style (dark or light bg), than change color palette in index.css
-//   to keep consistent foreground/background color across components
-// - If you want to make theme switchable, pass `switchable` ThemeProvider and use `useTheme` hook
-
 function App() {
   return (
     <ErrorBoundary>
-      <ThemeProvider
-        defaultTheme="light"
-        switchable
-      >
-        <LanguageProvider>
-          <TooltipProvider>
-            <FraudEventsProvider>
-              <TourProvider>
-                <Navigation />
-                <Toaster />
-                <Router />
-                <TourOverlay />
-              </TourProvider>
-            </FraudEventsProvider>
-          </TooltipProvider>
-        </LanguageProvider>
+      <ThemeProvider defaultTheme="light">
+        <Toaster />
+        <AssistantProvider>
+          <ShieldNav />
+          <main className="min-h-[calc(100vh-5rem)] bg-slate-50">
+            <Router />
+          </main>
+        </AssistantProvider>
       </ThemeProvider>
     </ErrorBoundary>
   );

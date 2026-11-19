@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pdrm_service import PDRMService
 import pickle
+from shield_agent import router as shield_agent_router
 
 app = FastAPI(title="Digital Fraud Shield API")
 pdrm_service = PDRMService()
@@ -37,6 +38,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(shield_agent_router)
 
 # 1. Load the model and column list
 model = joblib.load('fraud_model.pkl')
@@ -236,6 +239,7 @@ class VoiceAuthenticityResponse(BaseModel):
     score: float
     confidence: str
     reasons: list[str]
+    heard_voice: bool = True
     mfcc_variability: float
     artifact_ratio: float
     pitch_smoothness: float
@@ -404,6 +408,7 @@ def _encode_voice_response(
     pitch_smoothness: float,
     speech_band_energy: float,
     high_band_energy: float,
+    heard_voice: bool = True,
 ) -> dict:
     confidence = "low"
     if score >= 0.68:
@@ -416,6 +421,7 @@ def _encode_voice_response(
         score=round(float(min(max(score, 0.0), 0.999)), 4),
         confidence=confidence,
         reasons=reasons,
+        heard_voice=heard_voice,
         mfcc_variability=round(float(mfcc_variability), 4),
         artifact_ratio=round(float(artifact_ratio), 4),
         pitch_smoothness=round(float(pitch_smoothness), 4),
@@ -441,6 +447,20 @@ def check_voice_authenticity(audio_file: UploadFile) -> dict:
     if y.size < sr // 2:
         raise ValueError("Audio sample is too short for authenticity analysis.")
 
+    rms_frames = librosa.feature.rms(y=y)
+    loudness = float(np.mean(rms_frames)) if rms_frames.size else 0.0
+    if loudness < 0.004:
+        return _encode_voice_response(
+            reasons=["I could not hear a voice in that sample. Check that the phone is on speaker and close to this computer."],
+            score=0.0,
+            mfcc_variability=0.0,
+            artifact_ratio=0.0,
+            pitch_smoothness=0.0,
+            speech_band_energy=0.0,
+            high_band_energy=0.0,
+            heard_voice=False,
+        )
+
     mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
     mfcc_variability = float(np.mean(np.std(mfccs, axis=1))) if mfccs.size else 0.0
 
@@ -452,6 +472,20 @@ def check_voice_authenticity(audio_file: UploadFile) -> dict:
     speech_band_energy = float(np.sum(stft[speech_range, :])) if speech_range.size else 0.0
     high_band_energy = float(np.sum(stft[artifact_range, :])) if artifact_range.size else 0.0
     artifact_ratio = high_band_energy / speech_band_energy if speech_band_energy > 0 else 0.0
+
+    # Broadband background noise has a flat spectrum; speech is concentrated in formants.
+    spectral_flatness = float(np.mean(librosa.feature.spectral_flatness(y=y)))
+    if spectral_flatness > 0.35:
+        return _encode_voice_response(
+            reasons=["I can hear background noise, but not a clear voice. Move the phone closer to the person speaking and try again."],
+            score=0.0,
+            mfcc_variability=mfcc_variability,
+            artifact_ratio=artifact_ratio,
+            pitch_smoothness=0.0,
+            speech_band_energy=speech_band_energy,
+            high_band_energy=high_band_energy,
+            heard_voice=False,
+        )
 
     # Pitch features
     f0, _, _ = librosa.pyin(
@@ -1243,7 +1277,7 @@ async def scan_qr_threat(payload: QRThreatScanRequest):
 
 
 @app.post("/voice-authenticity")
-async def voice_authenticity(audio_file: UploadFile = File(...)):
+def voice_authenticity(audio_file: UploadFile = File(...)):
     try:
         return check_voice_authenticity(audio_file)
     except ValueError as exc:
@@ -1442,6 +1476,7 @@ async def predict_fraud(txn: Transaction, allow_guardian_approval: bool = True):
         status_floor = 0.65
         effective_risk = max(effective_risk, status_floor)
     else:
+        status_floor = 0.0
         effective_risk = min(effective_risk, 0.30)
 
     effective_risk = min(max(effective_risk, 0.0), 0.999)
